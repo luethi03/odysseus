@@ -119,6 +119,25 @@ RUN pip install --no-cache-dir -r requirements.txt \
 # lib installed above; see the apt note near the top of this stage.
 RUN pip install --no-cache-dir python-magic==0.4.27
 
+# Optional Vulkan userspace for Intel (Arc / Arc Pro / iGPU) and other Mesa
+# GPUs. Off by default so the stock image stays slim. Enabled by
+# docker/gpu.intel.yml via build args. Cookbook builds llama.cpp with
+# -DGGML_VULKAN=ON when it finds /dev/dri/renderD* + libvulkan, which needs
+# the headers (libvulkan-dev), the shader compiler (glslc) and SPIR-V headers
+# at build time, and the Mesa ANV driver (mesa-vulkan-drivers) at run time.
+ARG INSTALL_VULKAN=false
+RUN if [ "$INSTALL_VULKAN" = "true" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends \
+            mesa-vulkan-drivers \
+            libvulkan1 \
+            libvulkan-dev \
+            vulkan-tools \
+            glslc \
+            spirv-headers \
+            libdrm2 \
+        && rm -rf /var/lib/apt/lists/*; \
+    fi
+
 # Pre-install the patched basicsr/gfpgan/facexlib wheels built in the
 # realesrgan-wheels stage (--no-deps keeps the image lean — torch & friends are
 # pulled only when realesrgan is actually installed). With these dists already

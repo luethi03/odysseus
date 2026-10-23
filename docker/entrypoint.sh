@@ -47,6 +47,23 @@ if [ "${ODYSSEUS_ENABLE_HOST_DOCKER:-}" = "true" ] && [ -S "$DOCKER_SOCK" ]; the
     fi
 fi
 
+# GPU render/video nodes (Intel/AMD via /dev/dri). `group_add` in compose only
+# applies to the root entrypoint process; `gosu <username>` re-initialises
+# supplementary groups from /etc/group, which drops it. So add the app user to
+# a group matching each device node's GID, the same way the docker.sock block
+# above does. No-op when /dev/dri is absent.
+for node in /dev/dri/renderD* /dev/dri/card*; do
+    [ -e "$node" ] || continue
+    DRI_GID="$(stat -c '%g' "$node" 2>/dev/null || echo '')"
+    [ -z "$DRI_GID" ] && continue
+    [ "$DRI_GID" = "0" ] && continue
+    if ! getent group "$DRI_GID" >/dev/null 2>&1; then
+        groupadd -g "$DRI_GID" "gpu_$DRI_GID" 2>/dev/null || true
+    fi
+    DRI_GROUP="$(getent group "$DRI_GID" | cut -d: -f1)"
+    [ -n "$DRI_GROUP" ] && usermod -aG "$DRI_GROUP" "$ODY_USER" 2>/dev/null || true
+done
+
 mount_root_for() {
     awk -v target="$1" '$5 == target { print $4; exit }' /proc/self/mountinfo 2>/dev/null || true
 }

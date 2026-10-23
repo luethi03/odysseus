@@ -306,6 +306,93 @@ def _detect_amd():
         return None
 
 
+def _parse_vulkan_device_local_gb(text):
+    """Largest DEVICE_LOCAL memory heap (GiB) in the first GPU of `vulkaninfo` output."""
+    if not text:
+        return 0.0
+    # Only look at the first device's section if several GPUs are listed.
+    parts = re.split(r"(?m)^GPU\d+:", text)
+    section = parts[1] if len(parts) > 1 else text
+    best = 0
+    for m in re.finditer(r"memoryHeaps\[\d+\]:(.*?)(?=memoryHeaps\[\d+\]:|memoryTypes:|\Z)", section, re.S):
+        block = m.group(1)
+        if "MEMORY_HEAP_DEVICE_LOCAL_BIT" not in block:
+            continue
+        sz = re.search(r"size\s*=\s*(\d+)", block)
+        if sz:
+            best = max(best, int(sz.group(1)))
+    return best / (1024 ** 3)
+
+
+def _detect_intel():
+    """Detect Intel GPUs (Arc / Arc Pro / iGPU) via DRM sysfs + Vulkan.
+
+    Intel has no portable sysfs VRAM counter across i915 and xe, so memory
+    comes from Vulkan's device-local heap (`vulkaninfo`), falling back to
+    i915's lmem_total_bytes, then to the ODYSSEUS_INTEL_VRAM_GB override.
+    Reports backend="vulkan" — the llama.cpp path Cookbook builds for Mesa GPUs.
+    """
+    def _read(path):
+        if _remote_host:
+            val = _run(["cat", path])
+            return val.strip() if val else None
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                return f.read().strip()
+        except Exception:
+            return None
+
+    try:
+        if _remote_host:
+            out = _run(["ls", "/sys/class/drm"])
+            entries = [e for e in (out or "").split() if e.startswith("card") and "-" not in e]
+        else:
+            entries = [e for e in os.listdir("/sys/class/drm") if e.startswith("card") and "-" not in e]
+        intel = [(i, e) for i, e in enumerate(entries) if _read(f"/sys/class/drm/{e}/device/vendor") == "0x8086"]
+        if not intel:
+            return None
+
+        vk_text = _run(["vulkaninfo"]) or ""
+        vk_gb = _parse_vulkan_device_local_gb(vk_text)
+        name_m = re.search(r"deviceName\s*=\s*(.+)", vk_text)
+        vk_name = name_m.group(1).strip() if name_m else None
+
+        override = os.environ.get("ODYSSEUS_INTEL_VRAM_GB")
+        cards = []
+        is_igpu = False
+        for idx, entry in intel:
+            base = f"/sys/class/drm/{entry}"
+            lmem = _read(f"{base}/lmem_total_bytes")
+            lmem_gb = int(lmem) / (1024 ** 3) if lmem and lmem.isdigit() else 0.0
+            if not lmem_gb and not vk_gb:
+                is_igpu = True  # no local memory exposed: shares system RAM
+            vram_gb = lmem_gb or vk_gb
+            if override:
+                try:
+                    vram_gb = float(override)
+                except ValueError:
+                    pass
+            if vram_gb <= 0:
+                continue
+            cards.append({"index": idx, "name": vk_name or f"Intel GPU ({entry})", "vram_gb": vram_gb})
+
+        if not cards:
+            return None
+        groups = _group_gpus(cards)
+        return {
+            "gpu_name": cards[0]["name"],
+            "gpu_vram_gb": round(sum(c["vram_gb"] for c in cards), 1),
+            "gpu_count": len(cards),
+            "gpus": cards,
+            "gpu_groups": groups,
+            "homogeneous": len(groups) <= 1,
+            "backend": "vulkan",
+            "unified_memory": is_igpu,
+        }
+    except Exception:
+        return None
+
+
 def _detect_apple_silicon():
     """Detect Apple Silicon (M-series) GPUs.
 
@@ -859,7 +946,7 @@ def detect_system(host="", ssh_port="", platform="", fresh=False):
     cpu_name = _get_cpu_name()
     cpu_arch = _get_cpu_arch()
 
-    gpu_info = _detect_apple_silicon() or _detect_nvidia() or _detect_amd()
+    gpu_info = _detect_apple_silicon() or _detect_nvidia() or _detect_amd() or _detect_intel()
 
     if gpu_info:
         result = {

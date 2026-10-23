@@ -1,0 +1,33 @@
+# Intel GPU overlay (Arc / Arc Pro / Battlemage / iGPU, i915 or xe driver).
+# Enable by setting COMPOSE_FILE in .env:
+#   COMPOSE_FILE=docker-compose.yml:docker/gpu.intel.yml
+#   RENDER_GID=<numeric output of: getent group render | cut -d: -f3>
+#
+# Host requirements:
+#   - A kernel with Intel GPU support (i915, or xe for Battlemage) so that
+#     /dev/dri/renderD* exists on the HOST. Verify: ls -l /dev/dri
+#   - No Intel userspace is needed on the host; it all lives in the image.
+#
+# Unlike gpu.amd.yml / gpu.nvidia.yml this overlay also rebuilds the image
+# with the Vulkan userspace (Mesa ANV driver, headers, glslc) so Cookbook can
+# build llama.cpp with -DGGML_VULKAN=ON. The first start therefore needs a
+# local build:
+#   docker compose up -d --build
+#
+# Verify inside the container:
+#   docker compose exec odysseus vulkaninfo --summary
+# Then in Odysseus: Cookbook -> rescan hardware -> serve a GGUF model.
+services:
+  odysseus:
+    # Local tag so Compose builds instead of pulling the stock GHCR image.
+    image: ${ODYSSEUS_INTEL_IMAGE:-odysseus-intel:local}
+    pull_policy: build
+    build:
+      context: .
+      args:
+        INSTALL_VULKAN: "true"
+    devices:
+      - /dev/dri
+    group_add:
+      - video
+      - ${RENDER_GID:-render}
